@@ -1,0 +1,5 @@
+node_modules/
+frontend/dist/
+.DS_Store
+*.log
+# Note: backend/.env is intentionally committed (local MongoDB only, no secrets).
