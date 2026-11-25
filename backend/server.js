@@ -1,103 +1,68 @@
-const express = require('express');
-const cors = require('cors');
-const fs = require('fs');
 const path = require('path');
+const fs = require('fs');
+require('dotenv').config({ path: path.join(__dirname, '.env'), quiet: true });
+
+const express = require('express');
+const { connectWithRetry, isDatabaseReady } = require('./config/db');
+const studentRoutes = require('./routes/students');
+const courseRoutes = require('./routes/courses');
+const enrollmentRoutes = require('./routes/enrollments');
+const errorHandler = require('./middleware/errorHandler');
+const HttpError = require('./utils/httpError');
+
+const PORT = Number(process.env.PORT) || 3000;
+const MONGODB_URI = process.env.MONGODB_URI;
+const DIST_DIR = path.join(__dirname, '..', 'frontend', 'dist');
+const INDEX_HTML = path.join(DIST_DIR, 'index.html');
+
+if (!MONGODB_URI) {
+  console.error('MONGODB_URI is not set. Check backend/.env');
+  process.exit(1);
+}
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+app.disable('x-powered-by');
+app.use(express.json({ limit: '100kb' }));
 
-const DATA_FILE = path.join(__dirname, 'students.json');
-
-async function loadStudents() {
-    try {
-        const data = await fs.promises.readFile(DATA_FILE, 'utf8');
-        return JSON.parse(data);
-    } catch (error) {
-        if (error.code === 'ENOENT') {
-            return [];
-        }
-        console.error('Error reading students file:', error);
-        return [];
-    }
-}
-
-async function saveStudents(students) {
-    try {
-        await fs.promises.writeFile(DATA_FILE, JSON.stringify(students, null, 2), 'utf8');
-    } catch (error) {
-        console.error('Error writing students file:', error);
-        throw error;
-    }
-}
-
-// Endpoint to search for a student by name
-app.post('/find-student', async (req, res) => {
-    try {
-        const { name } = req.body;
-        if (!name) {
-            return res.status(400).send({ error: 'Student name is required' });
-        }
-
-        const students = await loadStudents();
-        const student = students.find((item) => item.name === name);
-        if (!student) {
-            return res.status(404).send({ error: 'Student not found' });
-        }
-
-        res.send(student);
-    } catch (error) {
-        console.error('Error finding student:', error);
-        res.status(500).send({ error: 'Internal server error' });
-    }
+// ---------- REST API ----------
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', database: isDatabaseReady() ? 'connected' : 'disconnected' });
 });
 
-// Endpoint to save a student
-app.post('/add-student', async (req, res) => {
-    try {
-        const { name, id, phone, zip } = req.body;
-        if (!name || !id || !phone || !zip) {
-            return res.status(400).send({ error: 'All fields (name, id, phone, zip) are required' });
-        }
-
-        const students = await loadStudents();
-        const newStudent = { name, id, phone, zip };
-        students.push(newStudent);
-        await saveStudents(students);
-
-        res.status(201).send({ message: 'Student added successfully', student: newStudent });
-    } catch (error) {
-        console.error('Error adding student:', error);
-        res.status(500).send({ error: 'Internal server error' });
-    }
+// Every other API route needs the database.
+app.use('/api', (req, res, next) => {
+  if (!isDatabaseReady()) {
+    return next(new HttpError(503, 'Database is unavailable. Make sure MongoDB is running and try again.'));
+  }
+  next();
 });
 
-// Endpoint to delete a student by name
-app.post('/delete-student', async (req, res) => {
-    try {
-        const { name } = req.body;
-        if (!name) {
-            return res.status(400).send({ error: 'Student name is required' });
-        }
+app.use('/api/students', studentRoutes);
+app.use('/api/courses', courseRoutes);
+app.use('/api/enrollments', enrollmentRoutes);
 
-        const students = await loadStudents();
-        const index = students.findIndex((item) => item.name === name);
-        if (index === -1) {
-            return res.status(404).send({ error: 'Student not found' });
-        }
+app.use('/api', (req, res, next) => next(new HttpError(404, 'API endpoint not found')));
 
-        const deletedStudent = students.splice(index, 1)[0];
-        await saveStudents(students);
+// ---------- Vue production build ----------
+app.use(express.static(DIST_DIR));
 
-        res.send({ message: 'Student deleted successfully', student: deletedStudent });
-    } catch (error) {
-        console.error('Error deleting student:', error);
-        res.status(500).send({ error: 'Internal server error' });
-    }
+// History-mode fallback: any non-API GET returns index.html so refreshing
+// a routed page such as /courses works instead of returning 404.
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  if (!fs.existsSync(INDEX_HTML)) {
+    return res
+      .status(503)
+      .type('text')
+      .send('Frontend build not found. Run "npm run build" from the project root, then restart the server.');
+  }
+  res.sendFile(INDEX_HTML);
 });
 
-// Start the server
-const PORT = 3000;
+app.use(errorHandler);
+
 app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+  console.log(`Server is running on http://localhost:${PORT}`);
 });
+
+connectWithRetry(MONGODB_URI);
